@@ -1,0 +1,143 @@
+---
+title: 'ML9: MDS: Visually Exploring US Senator Similarity'
+author: "Rex YC WONG"
+date: "7 January 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Multidirectional Scaling, a set of statistical techniques used to visually depict the similarities and differences from set of distances. The process takes a distance matrix that specifies the distance between every pair of points in our data set and returns a set of coordinates fir those two points that approximates those distance.
+
+For all cases in this chapter, we will be using MDS to scale data in two dimensions. This is the most common way of using MDS because it allows for very simple visualizations of the data on a coordinate plot. It is perfectly reasonable, however, to use MDS to scale data into higher order dimensions, may reveal different levels of clustering among observations.
+
+The classical MDS procedure is part of R's base function as cmdscale, and its only required input is a distance matrix. By default, cmdscale will compute as an MDS in two dimensions, but we can set this using the k parameter.
+
+To calculate the shortest distance in a space, we use Euclidean distance(shortest direct path).
+Subtract two vectors, square the differences, sum them and then take a square root
+We use the function dist to produce the distant matrix
+
+We would like to address the question: do senators from different parties mix when clustered by roll records?
+
+```{r}
+
+library(foreign)
+library(ggplot2)
+
+data.dir <- "data/roll_call/"
+data.files <- list.files(data.dir)
+#the datafiles are stata files(.dta)
+#therefore we need foreign pacakge to load these datafiles
+rollcall.data <- lapply(data.files,
+                        function(f) read.dta(paste(data.dir,f,sep=""),convert.factors=FALSE))
+```
+
+We need to perform some grouping and subseting on the dataset to extract the data we really concern, Yeas as 1, Nays as -1, no-vote as 0
+```{r}
+rollcall.simplified <- function(df){
+  no.pres <- subset(df,state<99)
+  for(i in 10:ncol(no.pres)){
+    no.pres[,i] <- ifelse(no.pres[,i]>6,0,no.pres[,i])
+    no.pres[,i] <- ifelse(no.pres[,i]>0&no.pres[,i]<4,1,no.pres[,i])
+    no.pres[,i] <- ifelse(no.pres[,i]>1,-1,no.pres[,i])
+  }
+  return(as.matrix(no.pres[,10:ncol(no.pres)]))
+}
+
+rollcall.simple <- lapply(rollcall.data,rollcall.simplified)
+```
+
+The first step is  use the senator-by-votes matrix to create a senator-by-senator distance matrix on which we will perform the conversion steps for each Congress separately.
+
+We begin by performing the matrix multiplication and storing the results in the rollcall.dist variable. We then perform MDS using the cmdscale function via another call to lapply.
+
+Two things to notice about MDS operation:
+1) Although by default k = 2, it is a good practice to explicitly set the value
+2) we are multiplying all points by -1, this is done strictly for visualization, flipping the x-axis positioning of all points, and as we will see, put Democrats on the left side and Repulican on the right. In the American context this is a useful cue, as we typically think of Democrats as being ideologically left and Republicans as toward the right.
+
+```{r}
+rollcall.dist <- lapply(rollcall.simple,function(m) dist(m%*%t(m)))
+rollcall.mds <- lapply(rollcall.dist,
+                       function(d) as.data.frame((cmdscale(d,k=2))*-1))
+```
+
+Next, we need add back in the appropriate identification data to the coordinate points data frame in rollcall.mds so that we can visualize them in the context of party affiliation. We will do this using a simple for loop over the rollcall.mds list. 
+First, we set the names of the coordinate points columns to x and y. 
+Next, we access the original roll call data frames in rollcall.data and extract the senator names column. Recall, that we must first remove the Vice President. Also some of the senators names include first and last names, but most only the last. For consistency, we strip out the first names by splitting the name character vector by a comma and store that vector in the congress.names variable. 
+Finally, we use the transform function to add in the party affiliation as a factor and add the Congress Number
+```{r}
+congresses <- 101:111
+
+for(i in 1:length(rollcall.mds)){
+  names(rollcall.mds[[i]]) <- c("x","y")
+  congress <- subset(rollcall.data[[i]],state<99)
+  congress.names <- sapply(as.character(congress$name),
+                           function(n) strsplit(n,"[, ]")[[1]][1])
+  rollcall.mds[[i]] <- transform(rollcall.mds[[i]],name=congress.names,
+                                 party=as.factor(congress$party),congress=congresses[i])
+}
+```
+
+We use 110th congress as an example
+
+```{r}
+cong.110 <- rollcall.mds[[9]]
+
+base.110 <- ggplot(cong.110, aes(x = x, y = y)) +
+  scale_size(range = c(2,2), guide = 'none') +
+  scale_alpha(guide = 'none') +
+  theme_bw() +
+  theme(axis.ticks = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        panel.grid.major = element_blank()) +
+  ggtitle("Roll Call Vote MDS Clustering for 110th U.S. Senate") +
+  xlab("") +
+  ylab("") +
+  scale_shape(name = "Party", breaks = c("100", "200", "328"),
+              labels = c("Dem.", "Rep.", "Ind."), solid = FALSE) +
+  scale_color_manual(name = "Party", values = c("100" = "black",
+                                                "200" = "dimgray",
+                                                "328"="grey"),
+                     breaks = c("100", "200", "328"),
+                     labels = c("Dem.", "Rep.", "Ind."))
+
+print(base.110 + geom_point(aes(shape = party,
+                                alpha = 0.75,
+                                size = 2)))
+print(base.110 + geom_text(aes(color = party,
+                               alpha = 0.75,
+                               label = cong.110$name,
+                               size = 2)))
+```
+
+
+The final visualization, we will examine the MDS plots for all Congresses in chronological time. This should give us some indication as to the overall mixing of by party over time, and this will give us a more principled perspective on the statement that the Senate is more polarized now than it has ever been. In the previous code block we generate a single plot from all of the data by by collapsing rollcall.mds into a single dataframe using do.call and rbind. We then build up the exact same plot we produced in the previous step, except we add a facet_wrap to display the MDS plots in a chronological grid by Congress.
+
+```{r}
+
+all.mds <- do.call(rbind, rollcall.mds)
+all.plot <- ggplot(all.mds, aes(x = x, y = y)) +
+  geom_point(aes(shape = party, alpha = 0.75, size = 2)) +
+  scale_size(range = c(2, 2), guide = 'none') +
+  scale_alpha(guide = 'none') +
+  theme_bw() +
+  theme(axis.ticks = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        panel.grid.major = element_blank()) +
+  ggtitle("Roll Call Vote MDS Clustering for U.S. Senate (101st - 111th Congress)") +
+       xlab("") +
+       ylab("") +
+       scale_shape(name = "Party",
+                   breaks = c("100", "200", "328"),
+                   labels = c("Dem.", "Rep.", "Ind."),
+                   solid = FALSE) +
+      facet_wrap(~ congress)
+
+print(all.plot)
+```
+Noted that even though under the same scale, the polarity in 101th and 102 congress seem to be less severe, but remember we are using MDS procedure which simply attempts to minimize a cost function based on the 101st and 102nd distance matrix, it does not necessarily imply that the degress of polarity. There are several reasons can lead to this phenomenon such as number of observations. Since we are using the same scale, some are squeezed and some are stretched.
+

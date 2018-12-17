@@ -1,0 +1,425 @@
+---
+title: "ML4:Priority"
+author: "Wong Yat Chun"
+date: "2017 M12 26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We begin by ordering the messages chronologically because in this case much of what we are interested in predicting is contained in the temporal dimension. The first half of the these messages are used to train our ranker. Next, we have four features we will use during training. 
+The first is a proxy for the social feature, which measures the volume of messages from a given user in the training data. 
+Next, we attempt to compress the temporal measurements by looking for threads and ranking active threads higher than inactive ones.
+Finally, we add two content features based on frequent terms in email subjects and message bodies.
+We will also specify a weighting scheme that attempts to quickly push more important messages to the top of the stack
+
+Import Libraries
+```{r}
+library(tm)
+library(ggplot2)
+library(plyr)
+```
+Set the global paths
+```{r}
+easyham.path <- file.path("data","easy_ham")
+```
+
+msg.full simply returns the full text of a given email message
+```{r}
+msg.full <- function(path){
+  con <- file(path,encoding="latin1")
+  msg <- readLines(con)
+  close(con)
+  return(msg)
+}
+```
+Returns the email address of the sender for a given email message
+```{r}
+get.from <- function(msg.vec){
+  from <- msg.vec[grepl("From: ",msg.vec)]#same for using grep
+  from <- strsplit(from,'[":<>]')[[1]]
+  from <- from[which(from!=""&from!=" ")]
+  return(from[grepl("@",from)][1])
+}
+```
+Retuns the subject string for a given email message
+```{r}
+get.subject <- function(msg.vec){
+  subj <- msg.vec[grepl("Subject: ", msg.vec)]
+  if(length(subj) > 0){
+    return(strsplit(subj, "Subject: ")[[1]][2])
+  }
+  else{
+    return("")
+  }
+}
+```
+Similar to the function from Chapter 3, this returns only the message body for a given email.
+```{r}
+get.msg <- function(msg.vec){
+  msg <- msg.vec[seq(which(msg.vec == "")[1] + 1, length(msg.vec), 1)]
+  return(paste(msg, collapse = "\n"))
+}
+```
+Return the date a given email message was received
+```{r}
+get.date <- function(msg.vec){
+  date.grep <- grepl("^Date: ",msg.vec)
+  date.grep <- which(date.grep==TRUE) #in case else where match "Date:"
+  date <- msg.vec[date.grep[1]] #in case else where match "Date:"
+  date <- strsplit(date,"\\+|\\-|: ")[[1]][2]
+  date <- gsub("^\\s+|\\s+$","",date)
+  return(strtrim(date,25))
+}
+```
+This function ties all of the above helper functions together.
+It returns a vector of data containing the feature set used to categorize data as priority or normal HAM
+```{r}
+parse.email <- function(path)
+{
+  full.msg <- msg.full(path)
+  date <- get.date(full.msg)
+  from <- get.from(full.msg)
+  subj <- get.subject(full.msg)
+  msg <- get.msg(full.msg)
+  return(c(date, from, subj, msg, path))
+}
+```
+In this case we are not interested in classifiying SPAM or HAM, so we will take it as given that is is being performed.  As such, we will use the EASY HAM email to train and test our ranker.
+```{r}
+easyham.docs <- dir(easyham.path)
+easyham.docs <- easyham.docs[which(easyham.docs != "cmds")]
+easyham.parse <- lapply(easyham.docs,
+                        function(p) parse.email(file.path(easyham.path, p)))
+```
+Convert raw data from list to data frame
+```{r}
+ehparse.matrix <- do.call(rbind, easyham.parse)
+allparse.df <- data.frame(ehparse.matrix, stringsAsFactors = FALSE)
+names(allparse.df) <- c("Date", "From.EMail", "Subject", "Message", "Path")
+```
+
+Housekeeping:
+Convert date strings to POSIX for comparison. Because the emails data contain slightly different date format pattners we have to account for this by passining them as required partmeters of the function. 
+```{r}
+date.converter <- function(dates,pattern1,pattern2){
+  pattern1.convert <- strptime(dates,pattern1)
+  pattern2.convert <- strptime(dates,pattern2)
+  pattern1.convert[is.na(pattern1.convert)] <- pattern2.convert[is.na(pattern1.convert)]
+  return(pattern1.convert)
+}
+pattern1 <- "%a, %d %b %Y %H:%M:%S"
+pattern2 <- "%d %b %Y %H:%M:%S"
+
+#maybe due to the operating system, the return value is always NA
+
+Sys.setlocale("LC_TIME", "C") #this line will solve the problem
+
+allparse.df$Date <- date.converter(allparse.df$Date, pattern1, pattern2)
+
+```
+Convert emails and subjects to lower-case
+```{r}
+allparse.df$Subject <- tolower(allparse.df$Subject)
+allparse.df$From.EMail <- tolower(allparse.df$From.EMail)
+```
+Order the messages chronologically
+```{r}
+priority.df <- allparse.df[with(allparse.df, order(Date)), ]
+```
+We will use the first half of the priority.df to train our priority in-box algorithm. Later, we will use the second half to test.
+```{r}
+priority.train <- priority.df[1:(round(nrow(priority.df) / 2)), ]
+```
+
+The first step is to create rank weightings for all of the features. We begin with the simpliest: whom the email is from.
+Calculate the frequency of correspondence with all emailers in the training set
+```{r}
+#with(priority.train,table(From.EMail) summarize the data set and count the frequency of the address
+#melt convert those values into data.frame and we set the name for the values by changing the value.name
+from.weight <- reshape2::melt(with(priority.train,table(From.EMail)),
+                   value.name="Freq")
+
+from.weight <- from.weight[with(from.weight,order(Freq)),]
+```
+
+We take a subset of the from.weight data frame to show our most frequent correspondents
+```{r}
+from.ex <- subset(from.weight,Freq>6)
+from.scales <- ggplot(from.ex)+
+  geom_rect(aes(xmin=1:nrow(from.ex)-0.5,
+                xmax=1:nrow(from.ex)+0.5,
+                ymin=0,
+                ymax=Freq,
+                fill="lightgrey",
+                color="darkblue"))+
+  scale_x_continuous(breaks=1:nrow(from.ex),
+                     labels=from.ex$From.EMail)+
+  coord_flip()+
+  scale_fill_manual(values=c("lightgrey"="lightgrey"),guide="none")+
+  scale_color_manual(values=c("darkblue"="darkblue"),guide="none")+
+  ylab("Number of Emails Received (truncated at 6)")+
+  xlab("Sender Address")+
+  theme_bw()+
+  theme(axis.text.y = element_text(size=5,hjust=1))
+from.scales
+```
+
+We need to find a way to weight an observation from an average person in our training data without skewing that value to account for outliers.
+The answer comes in transforming the scales. We need to make the numerical relationship among the units in our feature set less extreme. If we compare the absolute frequency counts, it would be very problematic because we will want to establish a threshold for being either a priority message or not, based on the range of weight values produced by our ranker at the learning stage. With a extreme skewness, our threshold will be either far too low or far too high, so we need to rescale the units account for the nature of our data.
+
+Logarithms and log-transformation would be a simple choice. We can see that the volume of emails sent by the users in the training data follows a fairly steep exponential. By transforming those values by the natural log and lo base-10, we significantly flatten out that line. As we know, the log base-10 transforms the values substantially, whereas the natural log still provides some variation that will allow us to pull out meaningful weights from his training data. For this reason, we will use the natural log to define the weight for our email volume feature.
+
+Noted that when using log-transformation in a weighting scheme because any observation equal to one will be equal to zero. This is problematic because multiplying other weights with zero will zero out the entire value. To avoid this, we always add one to all observations before taking logs. (There is actually a function called log1p that computes log(1+p)). However, be careful if your data set contains an observation equals to zero.
+
+```{r}
+from.weight <- transform(from.weight,
+                         Weight=log(Freq+1),
+                         log10Weight=log10(Freq+1))
+
+from.rescaled <- ggplot(from.weight,aes(x=1:nrow(from.weight)))+
+  geom_line(aes(y=Weight,linetype="ln"))+
+  geom_line(aes(y=log10Weight,linetype="log10"))+
+  geom_line(aes(y=Freq,linetype="Absolute"))+
+  scale_linetype_manual(values=c("ln"=1,
+                                 "log10"=2,
+                                 "Absolute"=3),
+                        name="Scaleing")+
+  xlab("")+
+  ylab("Number of emails Received")+
+  theme_bw()+
+  theme(axis.text.y=element_blank(),axis.text.x = element_blank())
+
+from.rescaled
+```
+Weighting from Email thread activity
+Since we have no way of knowing whether the user we are building this ranking has responded to any emails, but we can group messages by their thread and measure how active they have been since they started. Our assumption in building this feature is that time is important, and therefore threads that have more messages sent over a short period of time are more active and consequently more important.
+
+The emails in our data set do not contain specific thread IDs, but a logical way to identify threads within the training data is to look for emails with a shared subject line. That is, if we find a subject that begins with "re: ", then we know that this is part of some thread. When we see a message like this, we can look around for other messages in that thread and measure the activity.
+
+```{r}
+find.threads <- function(email.df){
+  response.threads <- strsplit(email.df$Subject,"re: ")
+  is.thread <- sapply(response.threads,
+                      function(subj) ifelse(subj[1]=="",TRUE,FALSE))
+  threads <- response.threads[is.thread]
+  senders <- email.df$From.EMail[is.thread]
+  threads <- sapply(threads,
+                    function(t) paste(t[2:length(t)],collapse="re: "))# the first "re: " is removed, but in case there are "re: " somewhere else, or length(t) > 2 due to removal of multilple "re: ", we just want to remove the first one
+  return(cbind(senders,threads))
+}
+```
+The result matrix will have all of the senders and initial thread subject in our training data
+```{r}
+threads.matrix <- find.threads(priority.train)
+```
+
+Next, we create a weighting based on the senders who are most active in threads. This will be a supplement to the volume-based weighting we just did for the entire data set, but now we will focus only on those sender present in the threads.matrix. The function email.thread will take the threads.matrix as input and generate this secondary volume-based weighting
+```{r}
+email.thread <- function(threads.matrix){
+  senders <- threads.matrix[,1] #col 1 is the sender
+  senders.freq <- table(senders) #return freq
+  senders.matrix <- cbind(names(senders.freq),
+                          senders.freq,
+                          log(senders.freq+1))
+  senders.df <- data.frame(senders.matrix,stringsAsFactors = F)
+  row.names(senders.df) <- 1:nrow(senders.df) #change row name to row number, originally the row names are the email which is from senders.freq
+  names(senders.df) <- c("From.EMail","Freq","Weight")
+  senders.df$Freq <- as.numeric(senders.df$Freq)
+  senders.df$Weight <- as.numeric(senders.df$Weight)
+  return(senders.df)
+}
+senders.df <- email.thread(threads.matrix)
+```
+We will create a weighting based on threads that we know are active. We have already identified all of the threads in our training data and created a weighting based on the terms in those threads. Now we want to take that knowledge and give additional weight to known threads that are also active. The assumption is that if we already know the threads, we expect a user to place more importance on those threads that are more active
+
+thread.counts takes a given thread and the email.df data frame to generate a weighting based on this activity level. It returns a vector of thread activity, the time span of a thread, and its log-weight
+```{r}
+thread.counts <- function(thread,email.df){
+  #Need to check that we are not looking at the original message in a thread
+  #so we check the subjects against the 're: ' cue.
+  thread.times <- email.df$Date[which(email.df$Subject==thread|
+                                        email.df$Subject==paste("re:",thread))]
+  freq <- length(thread.times)
+  min.time <- min(thread.times)
+  max.time <- max(thread.times)
+  time.span <- as.numeric(difftime(max.time,min.time,units="secs"))
+  if(freq<2){
+    return(c(NA,NA,NA))
+  }else{
+    trans.weight <- freq/time.span #more freq, shorter time.span, the more active the email, the higher priority
+    #affine transformation: a linear movement of points in space. To get a non-negative weight in log, we simply add 10 to all values
+    log.trans.weight <- 10+log(trans.weight,base=10)
+    return(c(freq,time.span,log.trans.weight))
+  }
+}
+```
+get.threads uses the threads.counts function to generate a weights for all email threads
+```{r}
+get.threads <- function(threads.matrix,email.df){
+  threads <- unique(threads.matrix[,2]) #col2 are the thread, thread without "re "
+  thread.counts <- lapply(threads,function(t) thread.counts(t,email.df))
+  thread.matirx <- do.call(rbind,thread.counts)
+  return(cbind(threads,thread.matirx))
+}
+```
+
+Now, we put all of these function to work to generate a training set based on our thread features
+```{r}
+thread.weights <- get.threads(threads.matrix,priority.train)
+thread.weights <- data.frame(thread.weights,stringsAsFactors = F)
+names(thread.weights) <- c("Thread","Freq","Response","Weight") 
+thread.weights$Freq <- as.numeric(thread.weights$Freq)
+thread.weights$Response <- as.numeric(thread.weights$Response) #which is the time span
+thread.weights$Weight <- as.numeric(thread.weights$Weight)
+thread.weights <- subset(thread.weights,is.na(thread.weights$Freq)==FALSE) #at thread.count, if freq = 1, NA will be returned
+```
+
+Similar to what we did in Chapter 3, we create a simple function to return a vector of word counts.  This time, however, we keep the TDM as a free parameter of the function.
+```{r}
+term.counts <- function(term.vec, control){
+  vec.corpus <- Corpus(VectorSource(term.vec))
+  vec.tdm <- TermDocumentMatrix(vec.corpus, control = control)
+  return(rowSums(as.matrix(vec.tdm)))
+}
+
+thread.terms <- term.counts(thread.weights$Thread,
+                            control = list(stopwords = TRUE))
+thread.terms <- names(thread.terms) #for some reasons we only need the terms, not interested in the count of the term
+
+term.weights <- sapply(thread.terms,
+                       function(t) mean(thread.weights$Weight[grepl(t, thread.weights$Thread, fixed = TRUE)]))
+#terms are words, threads may contain the term, we are trying to find the mean weight of the threads that contain the term
+
+term.weights <- data.frame(list(Term = names(term.weights),
+                                Weight = term.weights),
+                           stringsAsFactors = FALSE,
+                           row.names = 1:length(term.weights))
+
+```
+Finally, create weighting based on frequency of terms in email.  Will be similar to SPAM detection, but in this case weighting high words that are particularly HAMMMY.
+```{r}
+msg.terms <- term.counts(priority.train$Message,
+                         control = list(stopwords = TRUE,
+                         removePunctuation = TRUE,
+                         removeNumbers = TRUE))
+msg.weights <- data.frame(list(Term = names(msg.terms),
+                               Weight = log(msg.terms, base = 10)), #weight here is the freq of terms
+                          stringsAsFactors = FALSE,
+                          row.names = 1:length(msg.terms))
+```
+Remove words that have a zero weight
+```{r}
+msg.weights <- subset(msg.weights, Weight > 0)
+```
+
+Now, we have from.weight(social activity feature), senders.df(sender activity in threads), thread.weight(thread message activity), term.weights(terms from active threads) and msg.weights(common terms in all emails)
+
+
+get.weights function uses our pre-calculated weight data frames to look up the appropriate weight for a given search.term. We use the 'term' parameter to determine if we are looking up a word in the weight.df for it message body weighting, or for its subject line weighting
+we treat these lookups slightly differently due to differences in column labels in the thread.weights data frame, the single boolean value for term will tell the application whether it is doing a lookup on a term data frame or on a thread data frame.
+```{r}
+get.weights <- function(search.term,weight.df,term=TRUE){
+  if(length(search.term)>0){ #make sure the search term is valid by checking it has some positive length
+    if(term){
+      term.match <- match(names(search.term),weight.df$Term)
+    }
+    else{
+      term.match <- match(search.term,weight.df$Thread)
+    }
+    match.weights <- weight.df$Weight[which(!is.na(term.match))]
+    if(length(match.weights)<1){
+      return(1) #it will alter the product computed in the next step
+    }
+    else{
+      return(mean(match.weights))
+      #if we have matched some weight values, we return the mean of all these weights as our results
+    }
+  }
+  else{
+    return(1) #it will alter the product computed in the next step
+  }
+}
+```
+
+Our final step is to create a function that will assign a weight to each message based on the mean weighting across our entire feature set.
+```{r}
+rank.message <- function(path){
+  msg <- parse.email(path)
+  #weighting based on message author
+  #First is just on the total frequency
+  from <- ifelse(length(which(from.weight$From.EMail==msg[2]))>0,
+                 from.weight$Weight[which(from.weight$From.EMail==msg[2])],1)
+  
+  #second is based on senders in threads, and threads themselves
+  thread.from <- ifelse(length(which(senders.df$From.EMail==msg[2]))>0,
+                        senders.df$Weight[which(senders.df$From.EMail==msg[2])],1)
+  
+  subj <- strsplit(tolower(msg[3]),"re: ")
+  is.thread <- ifelse(subj[[1]][1]=="",TRUE,FALSE)
+  activity <- ifelse(is.thread,get.weights(subj[[1]][2],thread.weights,term=FALSE),1)
+  
+  #Next, weight based on terms
+  
+  #weight based on terms in threads
+  threads.terms <- term.counts(msg[3],control = list(stopwords=stopwords()))
+  thread.terms.weights <- get.weights(thread.terms,term.weights)
+  
+  #Weight based terms in all messages
+  msg.terms <- term.counts(msg[4],control = list(stopwords=stopwords(),
+                                                 removePunctuation=TRUE,
+                                                 removeNumbers=TRUE))
+  msg.weights<- get.weights(msg.terms,msg.weights)
+  
+  #Calculate rank by interacting all weights
+  rank <- prod(from,thread.from,activity,
+               thread.terms.weights,msg.weights)
+  return(c(msg[1],msg[2],msg[3],rank))
+
+}
+```
+
+```{r}
+train.paths <- priority.df$Path[1:(round(nrow(priority.df)/2))]
+test.paths <- priority.df$Path[(round(nrow(priority.df)/2)+1):nrow(priority.df)]
+train.ranks <- lapply(train.paths,rank.message)
+train.ranks.matrix <- do.call(rbind,train.ranks)
+train.ranks.matrix <- cbind(train.paths,train.ranks.matrix,"TRAINING")
+train.ranks.df <- data.frame(train.ranks.matrix,stringsAsFactors = FALSE)
+names(train.ranks.df) <- c("Message","Date","From","Subj","Rank","Type")
+train.ranks.df$Rank <- as.numeric(train.ranks.df$Rank)
+priority.threshold <- median(train.ranks.df$Rank)
+train.ranks.df$Priority <- ifelse(train.ranks.df$Rank >=priority.threshold,1,0)
+```
+
+```{R}
+# Now, test our ranker by performing the exact same procedure on the test data
+test.ranks <- suppressWarnings(lapply(test.paths,rank.message))
+test.ranks.matrix <- do.call(rbind, test.ranks)
+test.ranks.matrix <- cbind(test.paths, test.ranks.matrix, "TESTING")
+test.ranks.df <- data.frame(test.ranks.matrix, stringsAsFactors = FALSE)
+names(test.ranks.df) <- c("Message","Date","From","Subj","Rank","Type")
+test.ranks.df$Rank <- as.numeric(test.ranks.df$Rank)
+test.ranks.df$Priority <- ifelse(test.ranks.df$Rank >= priority.threshold, 1, 0)
+```
+```{R}
+# Finally, we combine the data sets.
+final.df <- rbind(train.ranks.df, test.ranks.df)
+final.df$Date <- date.converter(final.df$Date, pattern1, pattern2)
+final.df <- final.df[rev(with(final.df, order(Date))), ]
+```
+
+```{r}
+testing.plot <- ggplot(subset(final.df, Type == "TRAINING"), aes(x = Rank)) +
+  stat_density(aes(fill = Type, alpha = 0.65)) +
+  stat_density(data = subset(final.df, Type == "TESTING"),
+               aes(fill = Type, alpha = 0.65)) +
+  geom_vline(xintercept = priority.threshold, linetype = 2) +
+  scale_alpha(guide = "none") +
+  scale_fill_manual(values = c("TRAINING" = "darkred", "TESTING" = "darkblue")) +
+  theme_bw()
+
+testing.plot
+```

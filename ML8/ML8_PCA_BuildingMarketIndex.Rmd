@@ -1,0 +1,118 @@
+---
+title: 'ML8: PCA: Building a Market Index'
+author: "Rex YC WONG"
+date: "7 January 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Principal component analysis is is a way to create a single column that combining information in multiple columns. The main idea is to create a new set of 25 columns that are ordered based on how much of the raw information in our data set they contain. The first new column, called the first principal component or just principal component, will often contain vast majority of the structure in the entire data set. PCA is particularly effective  when the columns in our data set are strongly correlated. In that case, you can replace the correlated columns with a single column that matches an underlying pattern that accounts for the correlaton between both columns
+
+We first test whether or not PCA will work by seeing how correlated the columns in our data set are. First we need load our data set into R
+
+```{r}
+prices <- read.csv('data/stock_prices.csv')
+library(ggplot2)
+library(lubridate)
+prices <- transform(prices,Date=ymd(Date))
+```
+
+We use the cast function in the reshape library to create a data matrix table. In the table, the rows will be days and the columns will be separate stocks.
+The cast function has you specify which column should be used to define the rows in the output matrix on the lefthand side of the tilde and the columns of the result are specified after the tilde. The actual entries in the result are specified using value.
+```{r}
+library(reshape)
+date.stock.matrix <- cast(prices,Date~Stock,value='Close')
+```
+
+We notice that there are some missing entries. So we go back to the prices data set, remove missing entries and then rerun cast:
+```{r}
+prices <- subset(prices,Date!=ymd('2002-02-01'))
+prices <- subset(prices,Stock!='DDR')
+date.stock.matrix <- cast(prices,Date~Stock,value='Close')
+```
+
+Then we find the correlations between all of the numeric columns in the matrix using the cor function. After doing that, we turn the correlation matrix into a single numeric vector and a density plot of the correlations to get a sense of both a) the mean correlation and b)the frequency with which low correlations occur.
+```{r}
+cor.matrix <- cor(date.stock.matrix[,2:ncol(date.stock.matrix)])
+correlations <- as.numeric(cor.matrix)
+
+ggplot(data.frame(Correlation=correlations),
+       aes(x=Correlation,fill=1))+
+  geom_density()+
+  theme(legend.position = 'none')
+```
+The density plot shows that the majority of correlations are positive, so PCA will probably work well on this data set.
+
+```{r}
+pca <- princomp(date.stock.matrix[,2:ncol(date.stock.matrix)])
+pca
+```
+In the summary, the standard deviation tell us how much of the variance in the data set is accounted for by the different principal components. The first component called Comp.1 accounts for 29% of the variance, while the next component accounts for 20%... This suggests that we can learn a lot about our data by just looking at the first principal component.
+
+We will examine the first principal component in more detail by looking at its loadings, which tell us how much weight it gives to each of the columns. We get those by extracting the loadings element of the princomp object stored in pca. Extracting loadings give us a big matrix that tells us how much each of the 25 columns gets puts into each of the principal components. We are only interested in the first component, so we pull out the first column of the pca loadings.
+
+```{r}
+principal.component <- pca$loadings[,1]
+loadings <- as.numeric(principal.component)
+ggplot(data.frame(Loading=loadings),aes(x=Loading,fill=1))+
+  geom_density()+
+  theme(legend.position = 'none')
+```
+
+We can see that the distribution is okay, but most of the loadings are negative, which is suspicious. We will see what this will lead to and we will fix it using a single line of codes
+
+Now that we have our principal component, we might want to generate our one-column summary of our data set. We do that using the predict function:
+```{r}
+market.index <- predict(pca)[,1]
+```
+To test whether the prediction is good, we can use Dow Jones as a benchmark.
+```{r}
+dji.prices <- read.csv('data/DJI.csv',stringsAsFactors = F)
+dji.prices <- transform(dji.prices,Date <- ymd(Date))
+dji.prices <- subset(dji.prices,Date>ymd('2001-12-31'))
+dji.prices <- subset(dji.prices,Date!=ymd('2002-02-01'))
+
+dji <- with(dji.prices,rev(Close))
+dates <- with(dji.prices,rev(Date))
+```
+We can then make a comparison plot to compare our market index generated using PCA with the DJI:
+```{r}
+comparison <- data.frame(Date=dates,MarketIndex=market.index,DJI=dji)
+ggplot(comparison,aes(x=MarketIndex,y=DJI))+
+  geom_point()+
+  geom_smooth(method='lm',se=FALSE)
+```
+
+The problem is those negative loadings seemed suspitious before turn to be a real source of trouble for our data set: our index is negatively correlated with the DJI. We can multiply our index by -1 to produce an index that's correlated in the right direction with the DJI.
+
+```{r}
+comparison <- data.frame(Date=dates,MarketIndex= -1*market.index, DJI=dji)
+ggplot(comparison,aes(x=MarketIndex,y=DJI))+
+  geom_point()+
+  geom_smooth(method='lm',se=FALSE)
+```
+It looks alright, we also want to get a sense of how well our index tracks the DJI over time.
+We can easily make that comparison. First, we use the melt function to get a data.frame that is easy to work with for visualizing both indice at once. Then we make a line plot in which the x-axis is the date and the y-axis is the price of each index
+
+```{r}
+alt.comparison <- melt(comparison,id.vars = 'Date')
+names(alt.comparison) <- c('Date','Index','Price')
+ggplot(alt.comparison,aes(x=Date,y=Price,group=Index,color=Index))+
+  geom_point()+
+  geom_line()
+
+```
+This doesn't look good because they are not in the same scale
+But we can fix that using scale, which puts both indices on a common scale
+```{R}
+comparison <- transform(comparison,MarketIndex=-scale(MarketIndex))
+comparison <- transform(comparison,DJI=scale(DJI))
+alt.comparison <- melt(comparison,id.vars = 'Date')
+names(alt.comparison) <- c('Date','Index','Price')
+ggplot(alt.comparison,aes(x=Date,y=Price,group=Index,color=Index))+
+  geom_point()+
+  geom_line()
+```

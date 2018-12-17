@@ -1,0 +1,175 @@
+---
+title: 'ML6: Text Regression'
+author: "Wong Yat Chun"
+date: "2018 M01 5"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Regularization: prevent overfitting by restraining our model from matching noise in the training data we use to fit it.
+
+glmnet package provides function called glmnet to fit linear models using regularization
+
+To use glmnet, we have to convert vector x into matrix x, glmnet(x= y=), the df produced by glmnet does not include intercept because we don't want to be penalized by its size, %dev is $R^2$, 
+
+Lambda is the most important piece of information for regularization.  It is a parameter of the regularization algorithm that controls how complex the model you fit is allowed to be. It controls the final values for the main parameters of the model, so Lambda is often referred to as a hyperparameter
+
+When lambda is very large, we penalize the model very heavily for being complex, and this penalization pushed all of the coefficients toward zero.
+When lambda is very small, we do not penalize the model for being complex.
+
+Aim:  find a setting for Lambda that gives the best possible model. 
+How? Employ cross-validation as part of the process of working with regularization. We would fit the model with different values for Lambda on a training set and see how it performs on a held-out test set. After doing this for many values of Lambda We would be able to see which value of Lambda gives us the best performance on the test data. 
+
+When using text as an input for a regression problem, we alomost always have far more inputs(words) than observationa(documents). If we have more observations than 1-grams(single words), we can simply consider 2-grams(pairs of words) or 3-grams(triplets of words) until we have more n-grams than documents. Because our data set has more columns than rows, unregulated linear regression will always produce an overfit model. For that reason, we have to use some form of regularization to get any meaningful results.
+
+We trt to predict the relative popularity of the top-100-selling books that O'Reilly has ever published using only the descriptions of those books from their back covers as input.
+
+To tranform these text descriptions into a useful set of inputs, we'll convert each book's description into a vector of word counts so that we can see how often words such as "the" and "Perl" occur in each description. The results of our analysis will be, in theory, a list of the words in a book's description that predict high sales.
+
+Import tm library
+```{r}
+library("tm")
+```
+
+Import Data and dtm formation
+```{r}
+ranks <- read.csv('data/oreilly.csv',stringsAsFactors = F)
+documents <- data.frame(Text=ranks$Long.Desc.)
+row.names(documents) <- 1:nrow(documents)
+
+corpus <- Corpus(DataframeSource(documents))
+corpus <- tm_map(corpus,content_transformer(tolower)) #the original code does not work
+corpus <- tm_map(corpus,content_transformer(stripWhitespace))
+corpus <- tm_map(corpus,removeWords,stopwords('english'))
+dtm <- DocumentTermMatrix(corpus)
+```
+
+Manipulate the variables so that meke it easier to describe our regression problem to glmnet
+```{r}
+x <- as.matrix(dtm)
+y <- rev(1:100) # so that the highest-ranked book has a y-value of 100 and the lowest has a y-value of 0
+```
+
+Initialize our random seed and load the glmnet package
+
+```{r}
+set.seed(1)
+library('glmnet')
+```
+
+Having done that set up work, we can loop over several possible values for Lambda to see which gives the best results on held-out data.
+Because we don't have a lot of data, we do this split 50 times for each value of Lambda to get a better sense of the accuracy we get from different levels of regularization.
+In the following code, we set a value fo Lambda, split the data into a training set and test set 50 times, and then assess our model's performance on each split
+```{r}
+performance <- data.frame()
+for (lambda in c(0.1,0.25,0.5,1,2,5)){
+  for(i in 1:50){
+    indices <- sample(1:100,80)
+    training.x <- x[indices,]
+    training.y <- y[indices]
+    
+    test.x <- x[-indices,]
+    test.y <- y[-indices]
+    
+    glm.fit <- glmnet(training.x,training.y)
+    predicted.y <- predict(glm.fit,test.x,s=lambda)
+    rmse <- sqrt(mean((predicted.y-test.y)^2))
+    
+    performance <- rbind(performance,
+                         data.frame(Lambda=lambda,
+                                    Iteration = i,
+                                    RMSE=rmse))
+  }
+}
+```
+After computing the performance of the model for these different values of Lambda, we can compare them to see where the model does best
+```{r}
+library(ggplot2)
+
+ggplot(performance,aes(x=Lambda,y=RMSE))+
+  stat_summary(fun.data='mean_cl_boot',geom='errorbar')+ #package "Hmisc" is required
+  stat_summary(fun.data='mean_cl_boot',geom='point')
+```
+
+Looking at the graph, we find that the model gets better and better with higher values of Lambda, but that occurs exactly when the model reduces to noting more than a intercept.
+There is no signal here our text regression can find, everything turns out to be noise when you test the model against held-out data.
+
+Logistic Regression to the rescue
+
+Although we fail to build a tool that predicts ranks from texts, we might try to do something simpler and see if we can predict whether a book appears in the top 50 or not
+
+To do that we switch our regression problem to a classification problem. Instead of predicting one of the infinitely many possible ranks, we are switching to a simple categorical judgment: is this book in the top 50 or not?
+
+To start, we add class lables to our data set
+```{r}
+y <- rep(c(1,0),each=50)
+#1 means top 50, 0 otherwise
+```
+
+Logistic regression is a form of regression in which one predicts the probability that an item belongs to one of two categories. Because probabilities are always between 0 and 1, we can threshold them at 0.5 to construct a classification algorithm
+
+Fit the model with logistic regression. 'family' controls the type of errors you expect to see when making predictions.
+Linear regression assumes the errors you see have a Gaussian distribution whereas logistic regression assumes that the errors are binomially distributed which produces errors that are all 0s and 1s.
+
+```{r}
+regularized.fit <- glmnet(x,y,family = 'binomial')
+```
+
+Having fit a logistic regression to the entire data set, let's see what the predictions from our model look like using the predict function:
+```{r}
+predict(regularized.fit,newx=x,s=0.001)
+```
+
+The output contains both positive and negative values, even though we are hoping to get predictions that are 0 or 1. 
+One way to solve the problem is to threshold them at 0 and make 0/1 predictions using the ifelse function
+```{r}
+ifelse(predict(regularized.fit,newx=x,s=0.001)>0,1,0)
+```
+
+The second is to convert these raw predictions into probabilities, which we can more easily interpret - though we would have to do the thredholding again at 0.5 to get the 0/1 predictions we generated previously. To convert raw predictions into probabilities, we will use the inv.logit function from the boot package
+
+```{r}
+library(boot)
+inv.logit(predict(regularized.fit,newx=x,s=0.001))
+```
+Use regularization to do the classification.
+The algorithmic changes in this code snippet relative to the one we used for linear regression are few
+1)  the calls to glmnet, we used the binomial error family parameter for logistic regression
+2)  the thresholding step tht produces 0/1 predictions from the raw logistion predictions
+3)  the use of error rates rather than RMSE as our measure of model performance
+4)  250 splits instead of 50 splits is performed
+To make the increased splitting more efficient, we reverse the order of the splitting and lambda loops so that we don'tt redo the split for every single value of lambda.
+```{r}
+set.seed(1)
+performance <- data.frame()
+for(i in 1:250){
+  indices <- sample(1:100,80)
+  training.x <- x[indices,]
+  training.y <- y[indices]
+  test.x <- x[-indices,]
+  test.y <- y[-indices]
+  
+  for(lambda in c(0.0001,0.001,0.0025,0.005,0.01,0.25,0.5,0.1)){
+    glm.fit <- glmnet(x=training.x, y=training.y, family='binomial')
+   # predicted.y <- inv.logit(predict(glm.fit,test.x,s=lambda))
+    predicted.y <- ifelse(predict(glm.fit,test.x,s=lambda)>0,1,0)
+    error.rate <- mean(predicted.y != test.y)
+    performance <- rbind(performance,
+                         data.frame(Lambda=lambda,
+                                    Iteration=i,
+                                    ErrorRate=error.rate))
+  }
+}
+```
+
+
+```{r}
+ggplot(performance,aes(x=Lambda,y=ErrorRate))+
+  stat_summary(fun.data = 'mean_cl_boot',geom='errorbar')+
+  stat_summary(fun.data='mean_cl_boot',geom='point')+
+  scale_x_log10()
+
+```

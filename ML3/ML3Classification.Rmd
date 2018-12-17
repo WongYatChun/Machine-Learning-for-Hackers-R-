@@ -1,0 +1,247 @@
+---
+title: "ML3 Classification"
+author: "Wong Yat Chun"
+date: "2017 M12 24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The text classification algorithm we are going to use in this chapter is Naive Bayes classifier, looks for differences of this sort by searching through text for word that are either (a) noticeably more likely to occur in spam messages, or (b) noticeabley more likely to occur in ham messages. When a word is noticeably more likely to occur in one context rather than the other, its occurrence can be diagnostic of whether a new message is spam or ham.
+
+Ultimately, our text classifier formalizes this intuition by computing (a) the prob. of seeing the exact contents of an email conditioned on the email being assumed to be spam, and (b) the prob. of seeing the same email's contents conditioned on the email being assumed to be ham.
+
+Load libraries
+```{r}
+library(tm)
+library('ggplot2')
+```
+
+Set the global paths
+```{r}
+spam.path <- file.path("data", "spam")
+spam2.path <- file.path("data", "spam_2")
+easyham.path <- file.path("data", "easy_ham")
+easyham2.path <- file.path("data", "easy_ham_2")
+hardham.path <- file.path("data", "hard_ham")
+hardham2.path <- file.path("data", "hard_ham_2")
+```
+
+Return a single element vector of just the email body
+Open each file, find the first line break and return the text below the break as a character vector with a single text element
+```{r}
+get.msg <- function(path)
+{
+  con <- file(path,  encoding = "latin1") #'rt' mode stand for read as text, latin1 because many of the email msg contain non-ASCII characters and this encoding will aloow us to use these files.
+  text <- readLines(con) #readlines function will return each line of text of the file connection as a separate element of a character vector
+  msg <- text[seq(which(text == "")[1] + 1, length(text), 1)]# The message always begins after the first full line break
+  close(con) #close the file
+  return(paste(msg, collapse = "\n")) #collapse the vector into a single character element using the paste function and "\n"(new line) for the collapse argument
+}
+```
+
+Create a vector containing all of the messages, such that each element of the vector is a single email.
+```{r}
+spam.docs <- dir(spam.path) #gettig a listing of all of the filenames in the data/spam directory
+spam.docs <- spam.docs[which(spam.docs!="cmds")]
+#the directory contains some cmd filds, which is simply a long list of Unix base commands to move files in these directory, need to be removed
+all.spam <- sapply(spam.docs,
+                   function(p) get.msg(file.path(spam.path,p))) 
+#to create our vector of spam messages, we use the sapply function, which will apply get.msg to all of the spam file names and construct a vector of messages from the returned text
+#Note that we have to pass an anonymous function sappply in order to concatenate the filename with the appropriate directory path using the paste function.
+```
+
+define get.tdm which will take a vector of email messages and return a TDM
+```{r}
+get.tdm <- function(doc.vec){
+  doc.corpus <- Corpus(VectorSource(doc.vec))
+  control <- list(stopwords=TRUE,removePunctuation=TRUE,removeNumbers=TRUE,minDocFreq=2)
+  doc.dtm <- TermDocumentMatrix(doc.corpus,control)
+  return(doc.dtm)
+}
+```
+
+Create a DocumentTermMartrix from that vector
+```{r}
+spam.tdm <- get.tdm(all.spam)
+```
+
+Create a data frame that provides the feature set from the training SPAM data
+```{r}
+spam.matrix <- as.matrix(spam.tdm)
+spam.counts <- rowSums(spam.matrix)
+spam.df <- data.frame(cbind(names(spam.counts),
+                            as.numeric(spam.counts)),
+                      stringsAsFactors = FALSE)
+names(spam.df) <- c("term","frequency")
+spam.df$frequency <- as.numeric(spam.df$frequency)
+spam.occurrence <- sapply(1:nrow(spam.matrix),
+                          function(i){
+                            length(which(spam.matrix[i,]>0))/ncol(spam.matrix)
+                          })
+spam.density <- spam.df$frequency/sum(spam.df$frequency)
+```
+
+Add the term density and occurrence rate
+```{R}
+spam.df <- transform(spam.df,
+                     density = spam.density,
+                     occurrence = spam.occurrence)
+```
+
+Now do the same for the EASY HAM email
+```{r}
+easyham.docs <- dir(easyham.path)
+easyham.docs <- easyham.docs[which(easyham.docs != "cmds")]
+all.easyham <- sapply(easyham.docs[1:length(spam.docs)],
+                      function(p) get.msg(file.path(easyham.path, p)))
+
+easyham.tdm <- get.tdm(all.easyham)
+
+easyham.matrix <- as.matrix(easyham.tdm)
+easyham.counts <- rowSums(easyham.matrix)
+easyham.df <- data.frame(cbind(names(easyham.counts),
+                               as.numeric(easyham.counts)),
+                         stringsAsFactors = FALSE)
+names(easyham.df) <- c("term", "frequency")
+easyham.df$frequency <- as.numeric(easyham.df$frequency)
+easyham.occurrence <- sapply(1:nrow(easyham.matrix),
+                            function(i)
+                            {
+                              length(which(easyham.matrix[i, ] > 0)) / ncol(easyham.matrix)
+                            })
+easyham.density <- easyham.df$frequency / sum(easyham.df$frequency)
+
+easyham.df <- transform(easyham.df,
+                        density = easyham.density,
+                        occurrence = easyham.occurrence)
+```
+
+Run classifer against HARD HAM
+```{r}
+hardham.docs <- dir(hardham.path)
+hardham.docs <- hardham.docs[which(hardham.docs != "cmds")]
+```
+
+This is the our workhorse function for classifying email. It takes two required paramters: a file path to an email to classify, and a data frame of the trained data.  The function also takes two optional parameters.  First, a prior over the probability that an email is SPAM, which we set to 0.5 (naive), and constant value for the probability on words in the email that are not in our training data. The function returns the naive Bayes probability that the given email is SPAM.
+```{r}
+classify.email <- function(path, training.df, prior = 0.5, c = 1e-6)
+{
+  # Here, we use many of the support functions to get the
+  # email text data in a workable format
+  msg <- get.msg(path)
+  msg.tdm <- get.tdm(msg)
+  msg.freq <- rowSums(as.matrix(msg.tdm))
+  # Find intersections of words
+  msg.match <- intersect(names(msg.freq), training.df$term)
+  # Now, we just perform the naive Bayes calculation
+  if(length(msg.match) < 1)
+  {
+    return(prior * c ^ (length(msg.freq)))
+  }
+  else
+  {
+    match.probs <- training.df$occurrence[match(msg.match, training.df$term)]
+    return(prior * prod(match.probs) * c ^ (length(msg.freq) - length(msg.match)))
+  }
+}
+```
+
+Finally, attempt to classify the HARDHAM data using the classifer developed above. The rule is to classify a message as SPAM if Pr(email) = SPAM > Pr(email) = HAM
+```{r}
+spam.classifier <- function(path)
+{
+  pr.spam <- classify.email(path, spam.df)
+  pr.ham <- classify.email(path, easyham.df)
+  return(c(pr.spam, pr.ham, ifelse(pr.spam > pr.ham, 1, 0)))
+}
+```
+
+Get lists of all the email messages
+```{r}
+easyham2.docs <- dir(easyham2.path)
+easyham2.docs <- easyham2.docs[which(easyham2.docs != "cmds")]
+
+hardham2.docs <- dir(hardham2.path)
+hardham2.docs <- hardham2.docs[which(hardham2.docs != "cmds")]
+
+spam2.docs <- dir(spam2.path)
+spam2.docs <- spam2.docs[which(spam2.docs != "cmds")]
+```
+
+Classify them all!
+```{r}
+easyham2.class <- suppressWarnings(lapply(easyham2.docs,
+                                   function(p)
+                                   {
+                                     spam.classifier(file.path(easyham2.path, p))
+                                   }))
+hardham2.class <- suppressWarnings(lapply(hardham2.docs,
+                                   function(p)
+                                   {
+                                     spam.classifier(file.path(hardham2.path, p))
+                                   }))
+spam2.class <- suppressWarnings(lapply(spam2.docs,
+                                function(p)
+                                {
+                                  spam.classifier(file.path(spam2.path, p))
+                                }))
+```
+
+Create a single, final, data frame with all of the classification data in it
+```{r}
+easyham2.matrix <- do.call(rbind, easyham2.class)
+easyham2.final <- cbind(easyham2.matrix, "EASYHAM")
+
+hardham2.matrix <- do.call(rbind, hardham2.class)
+hardham2.final <- cbind(hardham2.matrix, "HARDHAM")
+
+spam2.matrix <- do.call(rbind, spam2.class)
+spam2.final <- cbind(spam2.matrix, "SPAM")
+
+class.matrix <- rbind(easyham2.final, hardham2.final, spam2.final)
+class.df <- data.frame(class.matrix, stringsAsFactors = FALSE)
+names(class.df) <- c("Pr.SPAM" ,"Pr.HAM", "Class", "Type")
+class.df$Pr.SPAM <- as.numeric(class.df$Pr.SPAM)
+class.df$Pr.HAM <- as.numeric(class.df$Pr.HAM)
+class.df$Class <- as.logical(as.numeric(class.df$Class))
+class.df$Type <- as.factor(class.df$Type)
+```
+
+Create final plot of results
+```{r}
+class.plot <- ggplot(class.df, aes(x = log(Pr.HAM), log(Pr.SPAM))) +
+    geom_point(aes(shape = Type, alpha = 0.5)) +
+    geom_abline( slope = 1) +
+    scale_shape_manual(values = c("EASYHAM" = 1,
+                                  "HARDHAM" = 2,
+                                  "SPAM" = 3),
+                       name = "Email Type") +
+    scale_alpha(guide = "none") +
+    xlab("log[Pr(HAM)]") +
+    ylab("log[Pr(SPAM)]") +
+    theme_bw() +
+    theme(axis.text.x = element_blank(), axis.text.y = element_blank())
+class.plot
+```
+
+
+Save results as a 2x3 table
+```{r}
+get.results <- function(bool.vector)
+{
+  results <- c(length(bool.vector[which(bool.vector == FALSE)]) / length(bool.vector),
+               length(bool.vector[which(bool.vector == TRUE)]) / length(bool.vector))
+  return(results)
+}
+
+easyham2.col <- get.results(subset(class.df, Type == "EASYHAM")$Class)
+hardham2.col <- get.results(subset(class.df, Type == "HARDHAM")$Class)
+spam2.col <- get.results(subset(class.df, Type == "SPAM")$Class)
+
+class.res <- rbind(easyham2.col, hardham2.col, spam2.col)
+colnames(class.res) <- c("NOT SPAM", "SPAM")
+print(class.res)
+```

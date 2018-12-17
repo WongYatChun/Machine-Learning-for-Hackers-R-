@@ -1,0 +1,59 @@
+---
+title: 'ML5: Predicting Page Views'
+author: "Wong Yat Chun"
+date: "2018 M01 5"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The case study will focus on using regression to predict the amount of page views for the top 1000 websites on the Internet as of 2011. 
+
+Import Library
+```{r}
+library(ggplot2)
+```
+
+We will start by making a scatterplot that relates PageViews with UniqueVisitors. Drawing scatterplots for numerical variablers before try to relate them by using regressing because a scatterplot can make it clear when the linearity assumption of regression isn't satisfied
+
+```{r}
+top.1000.sites <- read.csv('data/top_1000_sites.tsv',
+                           sep='\t',
+                           stringsAsFactors = F)
+ggplot(top.1000.sites,aes(x=PageViews,y=UniqueVisitors))+
+  geom_point()
+```
+
+It looks bad, this is a common problem when working with data that;s not normally distributed, because using a scale that's large enough to show the full range of values tends to place the majority of data points so close to each other that they can't be separated visually.
+
+One feasible way to tackle to problem is to change the scale by performing log-transformation
+```{r}
+ggplot(top.1000.sites,aes(x=log(PageViews),y=log(UniqueVisitors)))+
+  geom_point()
+```
+The ggplot2 package also contains a convenience function to change the scale of an axis to the log. You can use the scale_x_log or
+scale_y_log in this case. Also, recall from our discussion in Chapter 4 that in some cases you will want to use the logp function in R to avoid
+the errors related to taking the log of zero. In this case, however, that is not a problem.
+
+The resulting scatterplot looks like there's a potential line to be drawn using regression. Before we use lm to fit a regression line, we can use geom_smooth with the method = 'lm' argument to see what the regression line will look like
+```{r}
+ggplot(top.1000.sites,aes(x=log(PageViews),y=log(UniqueVisitors)))+
+  geom_point()+
+  geom_smooth(method='lm',se=F)
+```
+
+Find the values that defines the line's slope and intercept by calling lm
+```{r}
+lm.fit <- lm(log(PageViews)~log(UniqueVisitors),
+             data=top.1000.sites)
+summary(lm.fit)
+```
+
+```{R}
+lm.fit <- lm(log(PageViews) ~ HasAdvertising + log(UniqueVisitors) + InEnglish,
+data = top.1000.sites)
+summary(lm.fit)
+
+```
